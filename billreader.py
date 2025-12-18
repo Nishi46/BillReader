@@ -9,7 +9,45 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
 
+# Constants
 SPREADSHEET_PATH = Path("bills.xlsx")
+MAX_BILL_AMOUNT = 100000
+MIN_BILL_AMOUNT = 0.01
+MAX_COMPANY_NAME_LENGTH = 50
+EXCEL_SHEET_NAME_MAX_LENGTH = 31
+
+# Month name patterns (abbreviations and full names)
+MONTH_PATTERN = (
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+    r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+)
+
+MONTH_NAME_MAP = {
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+
+MONTH_NUMBER_TO_NAME = {
+    1: "January", 2: "February", 3: "March", 4: "April",
+    5: "May", 6: "June", 7: "July", 8: "August",
+    9: "September", 10: "October", 11: "November", 12: "December",
+}
+
+COMPANY_PATTERNS = {
+    r"consolidated\s+edison|con\s*ed": "ConEdison",
+    r"national\s+grid": "National Grid",
+    r"bank\s+of\s+america|bofa": "Bank of America",
+}
 
 
 @dataclass
@@ -21,80 +59,26 @@ class BillInfo:
 
 
 def extract_text_from_pdf(pdf_path: Path) -> str:
-    """Extracts all text from a PDF file."""
-    text_chunks = []
+    """Extract all text from a PDF file."""
     with pdfplumber.open(str(pdf_path)) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text() or ""
-            text_chunks.append(page_text)
-    return "\n".join(text_chunks)
+        return "\n".join(page.extract_text() or "" for page in pdf.pages)
 
 
 def detect_company(text: str) -> str:
     """
-    Heuristic company detection.
-    - Try matching against some known bill issuers
-    - Fallback to the first non-empty line
+    Detect company name from bill text.
+    Tries known patterns first, then falls back to first non-empty line.
     """
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-
-    # Simple, extensible pattern for known issuers
-    known_patterns = {
-        r"consolidated\s+edison|con\s*ed": "ConEdison",
-        r"national\s+grid": "National Grid",
-        r"bank\s+of\s+america|bofa": "Bank of America",
-    }
     lower_text = text.lower()
-    for pattern, name in known_patterns.items():
+    
+    for pattern, name in COMPANY_PATTERNS.items():
         if re.search(pattern, lower_text, re.IGNORECASE):
             return name
-
+    
     if lines:
-        return re.sub(r"\s+", " ", lines[0])[:50]
+        return re.sub(r"\s+", " ", lines[0])[:MAX_COMPANY_NAME_LENGTH]
     return "Unknown"
-
-
-MONTH_NAME_MAP = {
-    "jan": 1,
-    "january": 1,
-    "feb": 2,
-    "february": 2,
-    "mar": 3,
-    "march": 3,
-    "apr": 4,
-    "april": 4,
-    "may": 5,
-    "jun": 6,
-    "june": 6,
-    "jul": 7,
-    "july": 7,
-    "aug": 8,
-    "august": 8,
-    "sep": 9,
-    "sept": 9,
-    "september": 9,
-    "oct": 10,
-    "october": 10,
-    "nov": 11,
-    "november": 11,
-    "dec": 12,
-    "december": 12,
-}
-
-MONTH_NUMBER_TO_NAME = {
-    1: "January",
-    2: "February",
-    3: "March",
-    4: "April",
-    5: "May",
-    6: "June",
-    7: "July",
-    8: "August",
-    9: "September",
-    10: "October",
-    11: "November",
-    12: "December",
-}
 
 
 def month_number_to_name(month: int) -> str:
@@ -102,267 +86,201 @@ def month_number_to_name(month: int) -> str:
     return MONTH_NUMBER_TO_NAME.get(month, "Unknown")
 
 
+def _extract_month_year_from_match(match, month_idx: int, year_idx: int) -> Tuple[int, int]:
+    """Extract month and year from a regex match group."""
+    month_str = match.group(month_idx).lower()
+    year_str = match.group(year_idx)
+    month = MONTH_NAME_MAP[month_str]
+    year = int(year_str)
+    return month, year
+
+
 def detect_month_year(text: str) -> Optional[Tuple[int, int]]:
     """
-    Try to detect billing month and year from text.
-    Heuristics:
-    - Prefer explicit 'Billing period' lines with full dates
-    - Otherwise look for 'Month YYYY' style phrases
-    - Otherwise look for MM/YYYY or MM-YYYY formats
+    Detect billing month and year from text.
+    Tries multiple patterns in order of specificity.
     """
-
-    # First, handle explicit "Billing period: Jul 14, 2025 to Aug 05, 2025" style lines
-    billing_period_pattern = re.compile(
-        r"Billing period:\s+("
-        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
-        r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
-        r")\s+(\d{1,2}),\s+(\d{4})\s+to\s+("
-        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
-        r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
-        r")\s+(\d{1,2}),\s+(\d{4})",
+    # Pattern 1: "Billing period: Jul 14, 2025 to Aug 05, 2025"
+    pattern = re.compile(
+        rf"Billing period:\s+({MONTH_PATTERN})\s+(\d{{1,2}}),\s+(\d{{4}})\s+to\s+"
+        rf"({MONTH_PATTERN})\s+(\d{{1,2}}),\s+(\d{{4}})",
         re.IGNORECASE,
     )
-    billing_match = billing_period_pattern.search(text)
-    if billing_match:
-        start_month_str, start_day, start_year_str, end_month_str, end_day, end_year_str = billing_match.groups()
-        month = MONTH_NAME_MAP[start_month_str.lower()]
-        year = int(start_year_str)
-        return month, year
+    match = pattern.search(text)
+    if match:
+        return _extract_month_year_from_match(match, 1, 3)
 
-    # Handle date ranges with dash separator (e.g., Bank of America: "August 28 - September 27, 2021")
-    dash_date_range_pattern = re.compile(
-        r"("
-        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
-        r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
-        r")\s+(\d{1,2})\s*-\s*("
-        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
-        r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
-        r")\s+(\d{1,2}),\s+(\d{4})",
+    # Pattern 2: "August 28 - September 27, 2021" (dash separator)
+    pattern = re.compile(
+        rf"({MONTH_PATTERN})\s+(\d{{1,2}})\s*-\s*({MONTH_PATTERN})\s+(\d{{1,2}}),\s+(\d{{4}})",
         re.IGNORECASE,
     )
-    dash_match = dash_date_range_pattern.search(text)
-    if dash_match:
-        start_month_str, start_day, end_month_str, end_day, year_str = dash_match.groups()
-        month = MONTH_NAME_MAP[start_month_str.lower()]
-        year = int(year_str)
-        return month, year
+    match = pattern.search(text)
+    if match:
+        return _extract_month_year_from_match(match, 1, 5)
 
-    date_range_pattern = re.compile(
-        r"("
-        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
-        r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
-        r")\s+(\d{1,2}),\s+(\d{4})\s+to\s+("
-        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
-        r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
-        r")\s+(\d{1,2}),\s+(\d{4})",
+    # Pattern 3: "Jul 15, 2025 to Aug 13, 2025" (no prefix)
+    pattern = re.compile(
+        rf"({MONTH_PATTERN})\s+(\d{{1,2}}),\s+(\d{{4}})\s+to\s+"
+        rf"({MONTH_PATTERN})\s+(\d{{1,2}}),\s+(\d{{4}})",
         re.IGNORECASE,
     )
-    date_range_match = date_range_pattern.search(text)
-    if date_range_match:
-        start_month_str, start_day, start_year_str, end_month_str, end_day, end_year_str = date_range_match.groups()
-        month = MONTH_NAME_MAP[start_month_str.lower()]
-        year = int(start_year_str)
-        return month, year
+    match = pattern.search(text)
+    if match:
+        return _extract_month_year_from_match(match, 1, 3)
 
-    # National Grid bills may use numeric dates like 08-14-2025 to 09-13-2025
-    numeric_billing_pattern = re.compile(
-        r"Billing period[:\s]*"
-        r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})"  # start: MM-DD-YYYY or MM/DD/YYYY
-        r".{0,40}?"  # up to " to " or "-"
-        r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})",  # end: MM-DD-YYYY or MM/DD/YYYY
+    # Pattern 4: Numeric billing period "08-14-2025 to 09-13-2025"
+    pattern = re.compile(
+        r"Billing period[:\s]*(\d{1,2})[/-](\d{1,2})[/-](\d{4}).{0,40}?(\d{1,2})[/-](\d{1,2})[/-](\d{4})",
         re.IGNORECASE,
     )
-    numeric_billing_match = numeric_billing_pattern.search(text)
-    if numeric_billing_match:
-        start_month_str, start_day_str, start_year_str, end_month_str, end_day_str, end_year_str = (
-            numeric_billing_match.groups()
-        )
-        month = int(start_month_str)
-        year = int(start_year_str)
+    match = pattern.search(text)
+    if match:
+        month = int(match.group(1))
+        year = int(match.group(3))
         return month, year
 
-    # Credit card statements: "Statement Date: August 2021" or "Aug 2021"
-    statement_date_pattern = re.compile(
-        r"(?:statement\s+date|billing\s+period|statement\s+period)[:\s]+("
-        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
-        r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
-        r")\s+(\d{4})",
+    # Pattern 5: "Statement Date: August 2021"
+    pattern = re.compile(
+        rf"(?:statement\s+date|billing\s+period|statement\s+period)[:\s]+({MONTH_PATTERN})\s+(\d{{4}})",
         re.IGNORECASE,
     )
-    statement_match = statement_date_pattern.search(text)
-    if statement_match:
-        month_str, year_str = statement_match.groups()
-        month = MONTH_NAME_MAP[month_str.lower()]
-        year = int(year_str)
-        return month, year
+    match = pattern.search(text)
+    if match:
+        return _extract_month_year_from_match(match, 1, 2)
 
-    # Month name + year, e.g. "October 2025" or "Aug 2021"
-    month_year_pattern = re.compile(
-        r"\b("
-        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
-        r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
-        r")\s+(\d{4})",
-        re.IGNORECASE,
-    )
-    for match in month_year_matches:
-        month_str, year_str = match.groups()
-        month = MONTH_NAME_MAP[month_str.lower()]
-        year = int(year_str)
-        return month, year
+    # Pattern 6: "August 2021" or "Aug 2021" (month name + year)
+    pattern = re.compile(rf"\b({MONTH_PATTERN})\s+(\d{{4}})", re.IGNORECASE)
+    for match in pattern.finditer(text):
+        return _extract_month_year_from_match(match, 1, 2)
 
-    # Numeric month/year like 10/2025 or 10-2025
-    numeric_pattern = re.compile(r"\b(0?[1-9]|1[0-2])[/-](\d{4})\b")
-    for match in numeric_pattern.finditer(text):
-        month_str, year_str = match.groups()
-        month = int(month_str)
-        year = int(year_str)
+    # Pattern 7: "10/2025" or "10-2025" (numeric month/year)
+    pattern = re.compile(r"\b(0?[1-9]|1[0-2])[/-](\d{4})\b")
+    for match in pattern.finditer(text):
+        month = int(match.group(1))
+        year = int(match.group(2))
         return month, year
 
     return None
 
 
 def clean_amount_str(amount_str: str) -> Optional[float]:
+    """Clean and convert amount string to float."""
     try:
-        # Remove currency symbols and commas
         cleaned = re.sub(r"[^\d.\-]", "", amount_str)
-        if not cleaned:
-            return None
-        return float(cleaned)
+        return float(cleaned) if cleaned else None
     except ValueError:
         return None
 
 
+def _is_phone_number(context: str) -> bool:
+    """Check if context looks like a phone number (has digit-dash pattern)."""
+    return bool(re.search(r'\d-\d', context))
+
+
+def _extract_amounts_from_line(line: str, currency_pattern, decimal_pattern) -> list[float]:
+    """Extract currency amounts from a line of text."""
+    amounts = []
+    
+    # Try currency format ($XX.XX)
+    for match in currency_pattern.finditer(line):
+        amt = clean_amount_str(match.group(1))
+        if amt and amt < MAX_BILL_AMOUNT:
+            amounts.append(amt)
+    
+    # Try decimal format (XX.XX)
+    for match in decimal_pattern.finditer(line):
+        start, end = match.span()
+        context = line[max(0, start - 5):min(len(line), end + 5)]
+        if _is_phone_number(context):
+            continue
+        amt = clean_amount_str(match.group(1))
+        if amt and MIN_BILL_AMOUNT <= amt < MAX_BILL_AMOUNT:
+            amounts.append(amt)
+    
+    return amounts
+
+
 def detect_amount(text: str) -> Optional[float]:
     """
-    Detect a bill amount.
-    Heuristics:
-    - Prefer numbers near phrases like 'Total Amount Due'
-    - Fallback to the largest currency-like number
+    Detect bill amount from text.
+    Prefers amounts near keywords like 'Total Amount Due', then falls back to all amounts.
     """
     lines = text.splitlines()
-    amount_candidates: list[float] = []
-
+    currency_pattern = re.compile(r"\$\s*(\d[\d,]*\.\d{2})")
+    decimal_pattern = re.compile(r"(\d[\d,]*\.\d{2})")
     keyword_pattern = re.compile(
-        r"(total\s+amount\s+due|amount\s+due|total\s+due|current\s+charges|amount\s+due\s+now|new\s+balance|statement\s+balance|payment\s+due|balance\s+due)",
+        r"(total\s+amount\s+due|amount\s+due|total\s+due|current\s+charges|"
+        r"amount\s+due\s+now|new\s+balance|statement\s+balance|payment\s+due|balance\s+due)",
         re.IGNORECASE,
     )
-    # Improved money pattern: prefer amounts with $ or decimal points, avoid phone numbers
-    # Pattern 1: $XX.XX format (most reliable)
-    currency_pattern = re.compile(r"\$\s*(\d[\d,]*\.\d{2})")
-    # Pattern 2: XX.XX format (with decimal, likely currency)
-    decimal_pattern = re.compile(r"(\d[\d,]*\.\d{2})")
-    # Pattern 3: Generic number (fallback, but filter out phone numbers)
-    generic_pattern = re.compile(r"(\d[\d,]*\.?\d{0,2})")
 
-    # First pass: lines around 'Total Amount Due'
-    keyword_found = False
+    # First pass: look near keywords
     for idx, line in enumerate(lines):
         if keyword_pattern.search(line):
-            keyword_found = True
+            amounts = []
             for j in range(max(0, idx - 1), min(len(lines), idx + 2)):
-                line_text = lines[j]
-                
-                # First try: look for $XX.XX format
-                for m in currency_pattern.finditer(line_text):
-                    amt = clean_amount_str(m.group(1))
-                    if amt is not None and amt < 100000:  # Reasonable bill amount
-                        amount_candidates.append(amt)
-                
-                # Second try: look for XX.XX format (decimal amounts)
-                for m in decimal_pattern.finditer(line_text):
-                    # Check if this looks like a phone number (has dashes nearby or is part of a phone pattern)
-                    start, end = m.span()
-                    context = line_text[max(0, start-5):min(len(line_text), end+5)]
-                    if re.search(r'\d-\d', context):  # Skip if near dashes (phone numbers)
-                        continue
-                    amt = clean_amount_str(m.group(1))
-                    if amt is not None and 0.01 <= amt < 100000:  # Reasonable bill amount
-                        amount_candidates.append(amt)
-            
-            if amount_candidates:
-                # Prefer amounts with $ sign, then take the largest reasonable amount
-                result = max(amount_candidates)
-                return result
+                amounts.extend(_extract_amounts_from_line(lines[j], currency_pattern, decimal_pattern))
+            if amounts:
+                return max(amounts)
 
-    # Fallback: collect all currency-like numbers (with same filtering)
-    all_amounts: list[float] = []
-    for idx, line in enumerate(lines):
-        # Prefer $XX.XX format
-        for m in currency_pattern.finditer(line):
-            amt = clean_amount_str(m.group(1))
-            if amt is not None and amt < 100000:
-                all_amounts.append(amt)
-        
-        # Then XX.XX format (decimal amounts)
-        for m in decimal_pattern.finditer(line):
-            start, end = m.span()
-            context = line[max(0, start-5):min(len(line), end+5)]
-            if re.search(r'\d-\d', context):  # Skip phone numbers
-                continue
-            amt = clean_amount_str(m.group(1))
-            if amt is not None and 0.01 <= amt < 100000:
-                all_amounts.append(amt)
-
-    if all_amounts:
-        result = max(all_amounts)
-        return result
-    return None
+    # Fallback: collect all amounts
+    all_amounts = []
+    for line in lines:
+        all_amounts.extend(_extract_amounts_from_line(line, currency_pattern, decimal_pattern))
+    
+    return max(all_amounts) if all_amounts else None
 
 
 def parse_bill(pdf_path: Path) -> BillInfo:
+    """Parse a bill PDF and extract company, date, and amount."""
     text = extract_text_from_pdf(pdf_path)
-
     company = detect_company(text)
-
+    
     month_year = detect_month_year(text)
-    if month_year is None:
-        # Fallback if we can't detect a date
-        month, year = 1, 1970
-    else:
-        month, year = month_year
-
-    amount = detect_amount(text)
-    if amount is None:
-        amount = 0.0
-
+    month, year = (month_year if month_year else (1, 1970))
+    
+    amount = detect_amount(text) or 0.0
+    
     return BillInfo(company=company, month=month, year=year, amount=amount)
 
 
 def get_or_create_workbook(path: Path) -> Workbook:
-    if path.exists():
-        return load_workbook(path)
-    return Workbook()
+    """Get existing workbook or create a new one."""
+    return load_workbook(path) if path.exists() else Workbook()
 
 
 def normalize_sheet_name(company: str) -> str:
-    # Excel sheet names cannot contain: : \ / ? * [ ]
-    unsafe = r'[:\\/*?\[\]]'
-    safe_company = re.sub(unsafe, "_", company).strip()
-    if not safe_company:
-        safe_company = "Unknown"
-    sheet_name = f"{safe_company}_bill"
-    return sheet_name[:31]  # Excel limit
+    """Normalize company name for use as Excel sheet name."""
+    unsafe_chars = r'[:\\/*?\[\]]'
+    safe_name = re.sub(unsafe_chars, "_", company).strip() or "Unknown"
+    sheet_name = f"{safe_name}_bill"
+    return sheet_name[:EXCEL_SHEET_NAME_MAX_LENGTH]
 
 
 def get_or_create_company_sheet(wb: Workbook, company: str) -> Worksheet:
+    """Get or create a worksheet for the given company."""
     sheet_name = normalize_sheet_name(company)
+    
     if sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
+        return wb[sheet_name]
+    
+    # Replace default sheet if it's empty, otherwise create new
+    if len(wb.sheetnames) == 1 and wb.active.max_row == 1 and wb.active.max_column == 1:
+        ws = wb.active
+        ws.title = sheet_name
     else:
-        # If this is the very first sheet in a new workbook, replace the default one
-        if len(wb.sheetnames) == 1 and wb.active.max_row == 1 and wb.active.max_column == 1:
-            ws = wb.active
-            ws.title = sheet_name
-        else:
-            ws = wb.create_sheet(title=sheet_name)
-        # Add headers
-        ws.append(["month", "year", "amount"])
+        ws = wb.create_sheet(title=sheet_name)
+    
+    ws.append(["month", "year", "amount"])
     return ws
 
 
 def append_bill_to_spreadsheet(info: BillInfo, path: Optional[Path] = None) -> None:
+    """Append bill information to the spreadsheet."""
     if path is None:
         path = SPREADSHEET_PATH
+    
     wb = get_or_create_workbook(path)
     ws = get_or_create_company_sheet(wb, info.company)
     month_name = month_number_to_name(info.month)
@@ -371,15 +289,16 @@ def append_bill_to_spreadsheet(info: BillInfo, path: Optional[Path] = None) -> N
 
 
 def iter_pdf_files(paths: Iterable[Path]) -> Iterable[Path]:
-    for p in paths:
-        if p.is_dir():
-            for child in sorted(p.rglob("*.pdf")):
-                yield child
-        elif p.is_file() and p.suffix.lower() == ".pdf":
-            yield p
+    """Iterate over all PDF files in the given paths."""
+    for path in paths:
+        if path.is_dir():
+            yield from sorted(path.rglob("*.pdf"))
+        elif path.is_file() and path.suffix.lower() == ".pdf":
+            yield path
 
 
 def process_bills(paths: Iterable[Path]) -> None:
+    """Process all PDF bills and save to spreadsheet."""
     for pdf_path in iter_pdf_files(paths):
         print(f"Processing {pdf_path} ...")
         info = parse_bill(pdf_path)
@@ -392,6 +311,7 @@ def process_bills(paths: Iterable[Path]) -> None:
 
 
 def main(argv: Optional[Iterable[str]] = None) -> None:
+    """Main entry point."""
     global SPREADSHEET_PATH
     
     parser = argparse.ArgumentParser(
@@ -410,14 +330,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     )
 
     args = parser.parse_args(list(argv) if argv is not None else None)
-
     SPREADSHEET_PATH = Path(args.spreadsheet)
-
-    path_objs = [Path(p) for p in args.paths]
-    process_bills(path_objs)
+    process_bills(Path(p) for p in args.paths)
 
 
 if __name__ == "__main__":
     main()
-
-
