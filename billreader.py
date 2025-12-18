@@ -1,7 +1,5 @@
 import argparse
-import json
 import re
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
@@ -9,37 +7,6 @@ from typing import Iterable, Optional, Tuple
 import pdfplumber
 from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
-
-# #region agent log
-LOG_PATH = Path("/Users/nishi/Programming/BillReader/.cursor/debug.log")
-
-
-def _log(session_id: str, run_id: str, hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    """
-    Minimal NDJSON logger for debug mode. Writes a single JSON object per line.
-    """
-    try:
-        with open(LOG_PATH, "a") as f:
-            f.write(
-                json.dumps(
-                    {
-                        "sessionId": session_id,
-                        "runId": run_id,
-                        "hypothesisId": hypothesis_id,
-                        "location": location,
-                        "message": message,
-                        "data": data,
-                        "timestamp": int(time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-    except Exception:
-        # Best-effort logging only
-        pass
-
-
-# #endregion
 
 
 SPREADSHEET_PATH = Path("bills.xlsx")
@@ -55,43 +22,12 @@ class BillInfo:
 
 def extract_text_from_pdf(pdf_path: Path) -> str:
     """Extracts all text from a PDF file."""
-    # #region agent log
-    _log(
-        "debug-session",
-        "boa-run1",
-        "A",
-        "billreader.py:extract_text_from_pdf",
-        "PDF extraction started",
-        {"pdf_path": str(pdf_path)},
-    )
-    # #endregion
-
     text_chunks = []
     with pdfplumber.open(str(pdf_path)) as pdf:
         for page in pdf.pages:
             page_text = page.extract_text() or ""
             text_chunks.append(page_text)
-    text = "\n".join(text_chunks)
-
-    # #region agent log
-    _log(
-        "debug-session",
-        "boa-run1",
-        "A",
-        "billreader.py:extract_text_from_pdf",
-        "PDF extraction completed",
-        {
-            "text_length": len(text),
-            "first_800_chars": text[:800],
-            "last_400_chars": text[-400:] if len(text) > 400 else text,
-            "snippet_around_billing": text[text.lower().find("billing") - 80 : text.lower().find("billing") + 160]
-            if "billing" in text.lower()
-            else "",
-        },
-    )
-    # #endregion
-
-    return text
+    return "\n".join(text_chunks)
 
 
 def detect_company(text: str) -> str:
@@ -100,16 +36,6 @@ def detect_company(text: str) -> str:
     - Try matching against some known bill issuers
     - Fallback to the first non-empty line
     """
-    # #region agent log
-    _log(
-        "debug-session",
-        "boa-run1",
-        "H",
-        "billreader.py:detect_company",
-        "Function entry",
-        {"text_length": len(text), "first_200_chars": text[:200]},
-    )
-    # #endregion
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
     # Simple, extensible pattern for known issuers
@@ -121,41 +47,10 @@ def detect_company(text: str) -> str:
     lower_text = text.lower()
     for pattern, name in known_patterns.items():
         if re.search(pattern, lower_text, re.IGNORECASE):
-            # #region agent log
-            _log(
-                "debug-session",
-                "boa-run1",
-                "H",
-                "billreader.py:detect_company",
-                "Matched known pattern",
-                {"pattern": pattern, "name": name},
-            )
-            # #endregion
             return name
 
     if lines:
-        result = re.sub(r"\s+", " ", lines[0])[:50]
-        # #region agent log
-        _log(
-            "debug-session",
-            "boa-run1",
-            "H",
-            "billreader.py:detect_company",
-            "Using first line as company",
-            {"result": result, "first_line": lines[0]},
-        )
-        # #endregion
-        return result
-    # #region agent log
-    _log(
-        "debug-session",
-        "boa-run1",
-        "H",
-        "billreader.py:detect_company",
-        "No company found, returning Unknown",
-        {},
-    )
-    # #endregion
+        return re.sub(r"\s+", " ", lines[0])[:50]
     return "Unknown"
 
 
@@ -215,16 +110,6 @@ def detect_month_year(text: str) -> Optional[Tuple[int, int]]:
     - Otherwise look for 'Month YYYY' style phrases
     - Otherwise look for MM/YYYY or MM-YYYY formats
     """
-    # #region agent log
-    _log(
-        "debug-session",
-        "ng-run1",
-        "B",
-        "billreader.py:detect_month_year",
-        "Function entry",
-        {"text_length": len(text)},
-    )
-    # #endregion
 
     # First, handle explicit "Billing period: Jul 14, 2025 to Aug 05, 2025" style lines
     billing_period_pattern = re.compile(
@@ -242,20 +127,24 @@ def detect_month_year(text: str) -> Optional[Tuple[int, int]]:
         start_month_str, start_day, start_year_str, end_month_str, end_day, end_year_str = billing_match.groups()
         month = MONTH_NAME_MAP[start_month_str.lower()]
         year = int(start_year_str)
-        # #region agent log
-        _log(
-            "debug-session",
-            "ng-run1",
-            "B",
-            "billreader.py:detect_month_year",
-            "Matched named-month billing period with prefix",
-            {
-                "match": billing_match.group(),
-                "month": month,
-                "year": year,
-            },
-        )
-        # #endregion
+        return month, year
+
+    # Handle date ranges with dash separator (e.g., Bank of America: "August 28 - September 27, 2021")
+    dash_date_range_pattern = re.compile(
+        r"("
+        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+        r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+        r")\s+(\d{1,2})\s*-\s*("
+        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+        r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+        r")\s+(\d{1,2}),\s+(\d{4})",
+        re.IGNORECASE,
+    )
+    dash_match = dash_date_range_pattern.search(text)
+    if dash_match:
+        start_month_str, start_day, end_month_str, end_day, year_str = dash_match.groups()
+        month = MONTH_NAME_MAP[start_month_str.lower()]
+        year = int(year_str)
         return month, year
 
     date_range_pattern = re.compile(
@@ -273,20 +162,6 @@ def detect_month_year(text: str) -> Optional[Tuple[int, int]]:
         start_month_str, start_day, start_year_str, end_month_str, end_day, end_year_str = date_range_match.groups()
         month = MONTH_NAME_MAP[start_month_str.lower()]
         year = int(start_year_str)
-        # #region agent log
-        _log(
-            "debug-session",
-            "ng-run1",
-            "F",
-            "billreader.py:detect_month_year",
-            "Matched date range without prefix",
-            {
-                "match": date_range_match.group(),
-                "month": month,
-                "year": year,
-            },
-        )
-        # #endregion
         return month, year
 
     # National Grid bills may use numeric dates like 08-14-2025 to 09-13-2025
@@ -304,23 +179,24 @@ def detect_month_year(text: str) -> Optional[Tuple[int, int]]:
         )
         month = int(start_month_str)
         year = int(start_year_str)
-        # #region agent log
-        _log(
-            "debug-session",
-            "ng-run1",
-            "C",
-            "billreader.py:detect_month_year",
-            "Matched numeric billing period",
-            {
-                "match": numeric_billing_match.group(),
-                "month": month,
-                "year": year,
-            },
-        )
-        # #endregion
         return month, year
 
-    # Month name + year, e.g. "October 2025"
+    # Credit card statements: "Statement Date: August 2021" or "Aug 2021"
+    statement_date_pattern = re.compile(
+        r"(?:statement\s+date|billing\s+period|statement\s+period)[:\s]+("
+        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+        r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+        r")\s+(\d{4})",
+        re.IGNORECASE,
+    )
+    statement_match = statement_date_pattern.search(text)
+    if statement_match:
+        month_str, year_str = statement_match.groups()
+        month = MONTH_NAME_MAP[month_str.lower()]
+        year = int(year_str)
+        return month, year
+
+    # Month name + year, e.g. "October 2025" or "Aug 2021"
     month_year_pattern = re.compile(
         r"\b("
         r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
@@ -328,7 +204,7 @@ def detect_month_year(text: str) -> Optional[Tuple[int, int]]:
         r")\s+(\d{4})",
         re.IGNORECASE,
     )
-    for match in month_year_pattern.finditer(text):
+    for match in month_year_matches:
         month_str, year_str = match.groups()
         month = MONTH_NAME_MAP[month_str.lower()]
         year = int(year_str)
@@ -363,21 +239,11 @@ def detect_amount(text: str) -> Optional[float]:
     - Prefer numbers near phrases like 'Total Amount Due'
     - Fallback to the largest currency-like number
     """
-    # #region agent log
-    _log(
-        "debug-session",
-        "ng-run1",
-        "G",
-        "billreader.py:detect_amount",
-        "Function entry",
-        {"text_length": len(text)},
-    )
-    # #endregion
     lines = text.splitlines()
     amount_candidates: list[float] = []
 
     keyword_pattern = re.compile(
-        r"(total\s+amount\s+due|amount\s+due|total\s+due|current\s+charges|amount\s+due\s+now)",
+        r"(total\s+amount\s+due|amount\s+due|total\s+due|current\s+charges|amount\s+due\s+now|new\s+balance|statement\s+balance|payment\s+due|balance\s+due)",
         re.IGNORECASE,
     )
     # Improved money pattern: prefer amounts with $ or decimal points, avoid phone numbers
@@ -393,16 +259,6 @@ def detect_amount(text: str) -> Optional[float]:
     for idx, line in enumerate(lines):
         if keyword_pattern.search(line):
             keyword_found = True
-            # #region agent log
-            _log(
-                "debug-session",
-                "ng-run1",
-                "G",
-                "billreader.py:detect_amount",
-                "Keyword match found",
-                {"line_idx": idx, "line": line[:100]},
-            )
-            # #endregion
             for j in range(max(0, idx - 1), min(len(lines), idx + 2)):
                 line_text = lines[j]
                 
@@ -411,16 +267,6 @@ def detect_amount(text: str) -> Optional[float]:
                     amt = clean_amount_str(m.group(1))
                     if amt is not None and amt < 100000:  # Reasonable bill amount
                         amount_candidates.append(amt)
-                        # #region agent log
-                        _log(
-                            "debug-session",
-                            "ng-run1",
-                            "G",
-                            "billreader.py:detect_amount",
-                            "Currency format candidate",
-                            {"amount": amt, "line_idx": j, "match": m.group()},
-                        )
-                        # #endregion
                 
                 # Second try: look for XX.XX format (decimal amounts)
                 for m in decimal_pattern.finditer(line_text):
@@ -432,43 +278,11 @@ def detect_amount(text: str) -> Optional[float]:
                     amt = clean_amount_str(m.group(1))
                     if amt is not None and 0.01 <= amt < 100000:  # Reasonable bill amount
                         amount_candidates.append(amt)
-                        # #region agent log
-                        _log(
-                            "debug-session",
-                            "ng-run1",
-                            "G",
-                            "billreader.py:detect_amount",
-                            "Decimal format candidate",
-                            {"amount": amt, "line_idx": j, "match": m.group()},
-                        )
-                        # #endregion
             
             if amount_candidates:
                 # Prefer amounts with $ sign, then take the largest reasonable amount
                 result = max(amount_candidates)
-                # #region agent log
-                _log(
-                    "debug-session",
-                    "ng-run1",
-                    "G",
-                    "billreader.py:detect_amount",
-                    "Returning max from keyword area",
-                    {"result": result, "candidates": amount_candidates},
-                )
-                # #endregion
                 return result
-
-    # #region agent log
-    if not keyword_found:
-        _log(
-            "debug-session",
-            "ng-run1",
-            "G",
-            "billreader.py:detect_amount",
-            "No keyword found, falling back to all numbers",
-            {},
-        )
-    # #endregion
 
     # Fallback: collect all currency-like numbers (with same filtering)
     all_amounts: list[float] = []
@@ -478,17 +292,6 @@ def detect_amount(text: str) -> Optional[float]:
             amt = clean_amount_str(m.group(1))
             if amt is not None and amt < 100000:
                 all_amounts.append(amt)
-                # #region agent log
-                if len(all_amounts) <= 20:
-                    _log(
-                        "debug-session",
-                        "ng-run1",
-                        "G",
-                        "billreader.py:detect_amount",
-                        "Currency format from all text",
-                        {"amount": amt, "line_idx": idx, "match": m.group()},
-                    )
-                # #endregion
         
         # Then XX.XX format (decimal amounts)
         for m in decimal_pattern.finditer(line):
@@ -499,41 +302,10 @@ def detect_amount(text: str) -> Optional[float]:
             amt = clean_amount_str(m.group(1))
             if amt is not None and 0.01 <= amt < 100000:
                 all_amounts.append(amt)
-                # #region agent log
-                if len(all_amounts) <= 20:
-                    _log(
-                        "debug-session",
-                        "ng-run1",
-                        "G",
-                        "billreader.py:detect_amount",
-                        "Decimal format from all text",
-                        {"amount": amt, "line_idx": idx, "match": m.group()},
-                    )
-                # #endregion
 
     if all_amounts:
         result = max(all_amounts)
-        # #region agent log
-        _log(
-            "debug-session",
-            "ng-run1",
-            "G",
-            "billreader.py:detect_amount",
-            "Returning max from all amounts",
-            {"result": result, "total_candidates": len(all_amounts), "top_5": sorted(all_amounts, reverse=True)[:5]},
-        )
-        # #endregion
         return result
-    # #region agent log
-    _log(
-        "debug-session",
-        "ng-run1",
-        "G",
-        "billreader.py:detect_amount",
-        "No amounts found, returning None",
-        {},
-    )
-    # #endregion
     return None
 
 
