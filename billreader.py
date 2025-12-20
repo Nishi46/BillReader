@@ -57,7 +57,6 @@ class BillInfo:
     year: int
     amount: float
 
-
 def extract_text_from_pdf(pdf_path: Path) -> str:
     """Extract all text from a PDF file."""
     with pdfplumber.open(str(pdf_path)) as pdf:
@@ -272,8 +271,21 @@ def get_or_create_company_sheet(wb: Workbook, company: str) -> Worksheet:
     else:
         ws = wb.create_sheet(title=sheet_name)
     
-    ws.append(["month", "year", "amount"])
+    ws.append(["month", "year", "amount","total"])
     return ws
+
+
+def get_previous_total(ws: Worksheet) -> float:
+    """Get the previous running total from the last row."""
+    if ws.max_row <= 1:  # Only header row exists
+        return 0.0
+    
+    last_total = ws.cell(row=ws.max_row, column=4).value
+    
+    try:
+        return float(last_total) if last_total is not None else 0.0
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def append_bill_to_spreadsheet(info: BillInfo, path: Optional[Path] = None) -> None:
@@ -283,10 +295,14 @@ def append_bill_to_spreadsheet(info: BillInfo, path: Optional[Path] = None) -> N
     
     wb = get_or_create_workbook(path)
     ws = get_or_create_company_sheet(wb, info.company)
+    
+    previous_total = get_previous_total(ws)
+    new_total = previous_total + info.amount
+    
     month_name = month_number_to_name(info.month)
-    ws.append([month_name, info.year, info.amount])
-    wb.save(path)
+    ws.append([month_name, info.year, info.amount, new_total])
 
+    wb.save(path)
 
 def iter_pdf_files(paths: Iterable[Path]) -> Iterable[Path]:
     """Iterate over all PDF files in the given paths."""
